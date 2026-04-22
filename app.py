@@ -1,0 +1,333 @@
+from datetime import datetime, timezone
+
+import pandas as pd
+import streamlit as st
+from supabase import create_client
+
+WAREHOUSES = ["Club", "House"]
+VANS = [f"VAN{i}" for i in range(1, 11)]
+ALL_LOCATIONS = WAREHOUSES + VANS
+
+st.set_page_config(page_title="Inventory Tracker", layout="wide")
+
+
+@st.cache_resource
+def get_supabase():
+    url = st.secrets.get("SUPABASE_URL")
+    key = st.secrets.get("SUPABASE_ANON_KEY")
+    if (not url or not key) and "secrets" in st.secrets:
+        nested = st.secrets["secrets"]
+        url = url or nested.get("SUPABASE_URL")
+        key = key or nested.get("SUPABASE_ANON_KEY")
+    if not url or not key:
+        return None
+    return create_client(url, key)
+
+
+def check_config():
+    if get_supabase() is None:
+        st.error("Missing Supabase secrets. Add SUPABASE_URL and SUPABASE_ANON_KEY.")
+        st.code(
+            "SUPABASE_URL='https://your-project.supabase.co'\n"
+            "SUPABASE_ANON_KEY='your-anon-key'"
+        )
+        st.stop()
+
+
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def get_user_role(sb, user_id):
+    try:
+        row = (
+            sb.table("profiles")
+            .select("role")
+            .eq("id", user_id)
+            .maybe_single()
+            .execute()
+        )
+    except Exception:
+        return "staff"
+
+    if row is None or getattr(row, "data", None) is None:
+        return "staff"
+    return row.data.get("role", "staff")
+
+
+def login_screen(sb):
+    st.title("Inventory Tracker")
+    st.caption("Cloud inventory for warehouses and vans")
+    left, right = st.columns(2)
+
+    with left:
+        st.subheader("Log In")
+        email = st.text_input("Email", key="login_email")
+        password = st.text_input("Password", type="password", key="login_password")
+        if st.button("Log In", key="login_btn"):
+            try:
+                result = sb.auth.sign_in_with_password(
+                    {"email": email.strip(), "password": password}
+                )
+                st.session_state.session = result.session
+                st.session_state.user = result.user
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Login failed: {exc}")
+
+    with right:
+        st.subheader("Sign Up")
+        su_email = st.text_input("Email ", key="signup_email")
+        su_password = st.text_input("Password ", type="password", key="signup_password")
+        if st.button("Create Account", key="signup_btn"):
+            try:
+                sb.auth.sign_up(
+                    {"email": su_email.strip(), "password": su_password.strip()}
+                )
+                st.success("Account created. Now log in.")
+            except Exception as exc:
+                st.error(f"Sign up failed: {exc}")
+
+
+def ensure_seed_data(sb):
+    # Seeding can be blocked by RLS depending on role/policies.
+    # If blocked, skip silently so the app stays usable.
+    try:
+        count_rows = sb.table("inventory").select("id", count="exact").limit(1).execute()
+        total = count_rows.count or 0
+        if total > 0:
+            return
+    except Exception:
+        return
+
+    starter = [
+        ("Club", "Ice Buckets", 8),
+        ("Club", "Linens", 50),
+        ("House", "White Risers", 4),
+        ("House", "Orchids", 13),
+    ]
+    for location, item, qty in starter:
+        try:
+            sb.rpc(
+                "add_stock",
+                {"p_location": location, "p_item": item, "p_qty": qty},
+            ).execute()
+        except Exception:
+            # If user is not manager yet, add_stock may fail by design.
+            pass
+
+
+def list_inventory(sb):
+    resp = sb.table("inventory").select("*").gt("qty", 0).order("location").execute()
+    return resp.data or []
+
+
+def list_history(sb):
+    resp = sb.table("movements").select("*").order("created_at", desc=True).limit(200).execute()
+    return resp.data or []
+
+
+def get_qty(sb, location, item):
+    row = (
+        sb.table("inventory")
+        .select("qty")
+        .eq("location", location)
+        .eq("item", item)
+        .maybe_single()
+        .execute()
+    )
+    if row.data is None:
+        return 0
+    return int(row.data["qty"])
+
+
+def add_stock(sb, location, item, qty):
+    result = sb.rpc(
+        "add_stock",
+        {"p_location": location, "p_item": item, "p_qty": int(qty)},
+    ).execute()
+    return result.data
+
+
+def transfer(sb, from_loc, to_loc, item, qty):
+    if qty <= 0:
+        return False, "Quantity must be greater than 0."
+    try:
+        result = sb.rpc(
+            "transfer_inventory",
+            {
+                "p_from_location": from_loc,
+                "p_to_location": to_loc,
+                "p_item": item,
+                "p_qty": int(qty),
+            },
+        ).execute()
+        message = result.data or f"Moved {qty} {item} from {from_loc} to {to_loc}."
+        return True, message
+    except Exception as exc:
+        return False, str(exc)
+
+
+def show_table_for_location(inventory_rows, location):
+    rows = [
+        {"Item": r["item"], "Qty": r["qty"]}
+        for r in inventory_rows
+        if r["location"] == location and int(r["qty"]) > 0
+    ]
+    if not rows:
+        rows = [{"Item": "(empty)", "Qty": 0}]
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
+def main_app(sb):
+    role = get_user_role(sb, st.session_state.user.id)
+    st.title("Inventory Tracker")
+    st.caption("Manage stock across warehouses and vans.")
+    st.write(f"Logged in as: `{st.session_state.user.email}`")
+    st.write(f"Role: `{role}`")
+    if st.button("Log Out"):
+        sb.auth.sign_out()
+        st.session_state.pop("session", None)
+        st.session_state.pop("user", None)
+        st.rerun()
+
+    ensure_seed_data(sb)
+    inventory_rows = list_inventory(sb)
+    history_rows = list_history(sb)
+
+    tab1, tab2, tab3, tab4 = st.tabs(
+        ["View Inventory", "Add Stock", "Transfer / Return", "Movement History"]
+    )
+
+    with tab1:
+        left, right = st.columns(2)
+        with left:
+            st.subheader("Warehouses")
+            for wh in WAREHOUSES:
+                st.markdown(f"**{wh}**")
+                show_table_for_location(inventory_rows, wh)
+        with right:
+            st.subheader("Vans")
+            selected_van = st.selectbox("Choose van", VANS)
+            st.markdown(f"**{selected_van}**")
+            show_table_for_location(inventory_rows, selected_van)
+
+    with tab2:
+        st.subheader("Add Stock to Warehouse")
+        if role != "manager":
+            st.info("Only managers can add warehouse stock.")
+        else:
+            add_wh = st.selectbox("Warehouse", WAREHOUSES, key="add_wh")
+            add_item_name = st.text_input("Item name", key="add_item")
+            add_qty = st.number_input("Quantity", min_value=1, step=1, key="add_qty")
+            if st.button("Add Item", key="add_btn"):
+                item = add_item_name.strip().title()
+                if not item:
+                    st.error("Enter an item name.")
+                else:
+                    try:
+                        message = add_stock(sb, add_wh, item, int(add_qty))
+                        st.success(message or f"Added {int(add_qty)} {item} to {add_wh}.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Add stock failed: {exc}")
+
+    with tab3:
+        st.subheader("Transfer Warehouse -> Van")
+        c1, c2 = st.columns(2)
+        with c1:
+            from_wh = st.selectbox("From warehouse", WAREHOUSES, key="t_from_wh")
+            wh_items = sorted(
+                {r["item"] for r in inventory_rows if r["location"] == from_wh}
+            )
+            t_item = st.selectbox(
+                "Item",
+                wh_items if wh_items else ["(no items)"],
+                key="t_item",
+            )
+            t_qty = st.number_input("Quantity", min_value=1, step=1, key="t_qty")
+        with c2:
+            to_van = st.selectbox("To van", VANS, key="t_to_van")
+            st.write("")
+            st.write("")
+            if st.button("Transfer to Van", key="transfer_btn"):
+                if t_item == "(no items)":
+                    st.error("Selected warehouse has no items.")
+                else:
+                    ok, message = transfer(
+                        sb, from_wh, to_van, t_item, int(t_qty)
+                    )
+                    if ok:
+                        st.success(message)
+                        st.rerun()
+                    else:
+                        st.error(message)
+
+        st.divider()
+        st.subheader("Return Van -> Warehouse")
+        r1, r2 = st.columns(2)
+        with r1:
+            from_van = st.selectbox("From van", VANS, key="r_from_van")
+            van_items = sorted(
+                {r["item"] for r in inventory_rows if r["location"] == from_van}
+            )
+            r_item = st.selectbox(
+                "Item to return",
+                van_items if van_items else ["(no items)"],
+                key="r_item",
+            )
+            r_qty = st.number_input(
+                "Quantity to return", min_value=1, step=1, key="r_qty"
+            )
+        with r2:
+            to_wh = st.selectbox("Back to warehouse", WAREHOUSES, key="r_to_wh")
+            st.write("")
+            st.write("")
+            if st.button("Return to Warehouse", key="return_btn"):
+                if r_item == "(no items)":
+                    st.error("Selected van has no items.")
+                else:
+                    ok, message = transfer(
+                        sb, from_van, to_wh, r_item, int(r_qty)
+                    )
+                    if ok:
+                        st.success(message)
+                        st.rerun()
+                    else:
+                        st.error(message)
+
+    with tab4:
+        st.subheader("Recent Movements")
+        if not history_rows:
+            st.info("No activity yet.")
+        else:
+            display = [
+                {
+                    "Time": r.get("created_at", ""),
+                    "Action": r.get("action", ""),
+                    "From": r.get("from_location", ""),
+                    "To": r.get("to_location", ""),
+                    "Item": r.get("item", ""),
+                    "Qty": r.get("qty", 0),
+                    "User": r.get("user_id", ""),
+                }
+                for r in history_rows
+            ]
+            st.dataframe(
+                pd.DataFrame(display),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+
+def main():
+    check_config()
+    sb = get_supabase()
+    if "session" not in st.session_state or st.session_state.session is None:
+        login_screen(sb)
+        return
+    main_app(sb)
+
+
+if __name__ == "__main__":
+    main()
