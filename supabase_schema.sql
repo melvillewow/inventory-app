@@ -25,6 +25,12 @@ create table if not exists public.movements (
   user_id uuid references public.profiles(id)
 );
 
+create table if not exists public.signup_allowed_emails (
+  email text primary key,
+  added_by uuid references public.profiles(id),
+  created_at timestamptz not null default now()
+);
+
 create or replace function public.handle_new_user()
 returns trigger
 language plpgsql
@@ -55,6 +61,69 @@ as $$
     from public.profiles
     where id = auth.uid() and role = 'manager'
   );
+$$;
+
+create or replace function public.is_signup_email_allowed(p_email text)
+returns boolean
+language sql
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1
+    from public.signup_allowed_emails
+    where email = lower(trim(p_email))
+  );
+$$;
+
+create or replace function public.add_signup_allowed_email(p_email text)
+returns text
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not public.is_manager() then
+    raise exception 'Only managers can allow signup emails';
+  end if;
+
+  insert into public.signup_allowed_emails (email, added_by)
+  values (lower(trim(p_email)), auth.uid())
+  on conflict (email) do update
+  set added_by = excluded.added_by;
+
+  return 'Email approved for signup';
+end;
+$$;
+
+create or replace function public.remove_signup_allowed_email(p_email text)
+returns text
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not public.is_manager() then
+    raise exception 'Only managers can remove signup emails';
+  end if;
+
+  delete from public.signup_allowed_emails
+  where email = lower(trim(p_email));
+
+  return 'Email removed from signup allowlist';
+end;
+$$;
+
+create or replace function public.list_signup_allowed_emails()
+returns table (email text, created_at timestamptz)
+language sql
+security definer
+set search_path = public
+as $$
+  select s.email, s.created_at
+  from public.signup_allowed_emails s
+  where public.is_manager()
+  order by s.email;
 $$;
 
 create or replace function public.add_stock(
@@ -151,6 +220,7 @@ $$;
 alter table public.profiles enable row level security;
 alter table public.inventory enable row level security;
 alter table public.movements enable row level security;
+alter table public.signup_allowed_emails enable row level security;
 
 drop policy if exists "profiles_select_own" on public.profiles;
 create policy "profiles_select_own"
@@ -173,8 +243,19 @@ for select
 to authenticated
 using (true);
 
+drop policy if exists "signup_allowlist_manager_select" on public.signup_allowed_emails;
+create policy "signup_allowlist_manager_select"
+on public.signup_allowed_emails
+for select
+to authenticated
+using (public.is_manager());
+
 grant execute on function public.add_stock(text, text, integer) to authenticated;
 grant execute on function public.transfer_inventory(text, text, text, integer) to authenticated;
+grant execute on function public.is_signup_email_allowed(text) to anon, authenticated;
+grant execute on function public.add_signup_allowed_email(text) to authenticated;
+grant execute on function public.remove_signup_allowed_email(text) to authenticated;
+grant execute on function public.list_signup_allowed_emails() to authenticated;
 
 -- Run this once in Supabase SQL editor to promote your own account:
 -- update public.profiles

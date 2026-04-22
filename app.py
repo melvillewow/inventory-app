@@ -38,6 +38,10 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
+def normalize_email(email):
+    return email.strip().lower()
+
+
 def get_user_role(sb, user_id):
     try:
         row = (
@@ -81,8 +85,18 @@ def login_screen(sb):
         su_password = st.text_input("Password ", type="password", key="signup_password")
         if st.button("Create Account", key="signup_btn"):
             try:
+                clean_email = normalize_email(su_email)
+                if not clean_email:
+                    st.error("Enter an email address.")
+                    return
+                allowed = sb.rpc(
+                    "is_signup_email_allowed", {"p_email": clean_email}
+                ).execute()
+                if not allowed.data:
+                    st.error("This email is not approved yet. Ask a manager for access.")
+                    return
                 sb.auth.sign_up(
-                    {"email": su_email.strip(), "password": su_password.strip()}
+                    {"email": clean_email, "password": su_password.strip()}
                 )
                 st.success("Account created. Now log in.")
             except Exception as exc:
@@ -179,6 +193,21 @@ def show_table_for_location(inventory_rows, location):
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
+def list_allowed_signups(sb):
+    result = sb.rpc("list_signup_allowed_emails").execute()
+    return result.data or []
+
+
+def add_allowed_signup(sb, email):
+    return sb.rpc("add_signup_allowed_email", {"p_email": normalize_email(email)}).execute()
+
+
+def remove_allowed_signup(sb, email):
+    return sb.rpc(
+        "remove_signup_allowed_email", {"p_email": normalize_email(email)}
+    ).execute()
+
+
 def main_app(sb):
     role = get_user_role(sb, st.session_state.user.id)
     st.title("Inventory Tracker")
@@ -195,9 +224,16 @@ def main_app(sb):
     inventory_rows = list_inventory(sb)
     history_rows = list_history(sb)
 
-    tab1, tab2, tab3, tab4 = st.tabs(
-        ["View Inventory", "Add Stock", "Transfer / Return", "Movement History"]
-    )
+    tab_names = [
+        "View Inventory",
+        "Add Stock",
+        "Transfer / Return",
+        "Movement History",
+    ]
+    if role == "manager":
+        tab_names.append("User Access")
+    tabs = st.tabs(tab_names)
+    tab1, tab2, tab3, tab4 = tabs[0], tabs[1], tabs[2], tabs[3]
 
     with tab1:
         left, right = st.columns(2)
@@ -318,6 +354,34 @@ def main_app(sb):
                 use_container_width=True,
                 hide_index=True,
             )
+
+    if role == "manager":
+        with tabs[4]:
+            st.subheader("Signup Allowlist")
+            st.caption("Only emails in this list can create new accounts.")
+
+            new_email = st.text_input("Allow email", key="allow_email")
+            if st.button("Allow Email", key="allow_email_btn"):
+                try:
+                    add_allowed_signup(sb, new_email)
+                    st.success(f"Allowed: {normalize_email(new_email)}")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Could not allow email: {exc}")
+
+            allowed_rows = list_allowed_signups(sb)
+            if not allowed_rows:
+                st.info("No approved signup emails yet.")
+            else:
+                emails = sorted({row.get("email", "") for row in allowed_rows if row.get("email")})
+                selected = st.selectbox("Approved emails", emails, key="approved_email_pick")
+                if st.button("Remove Selected Email", key="remove_email_btn"):
+                    try:
+                        remove_allowed_signup(sb, selected)
+                        st.success(f"Removed: {selected}")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Could not remove email: {exc}")
 
 
 def main():
