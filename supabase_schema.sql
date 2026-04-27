@@ -31,6 +31,51 @@ create table if not exists public.signup_allowed_emails (
   created_at timestamptz not null default now()
 );
 
+create table if not exists public.events (
+  id bigint generated always as identity primary key,
+  title text not null,
+  event_date date not null,
+  start_time time not null,
+  end_time time not null,
+  status text not null default 'planned' check (status in ('planned', 'active', 'completed', 'cancelled')),
+  created_by uuid references public.profiles(id),
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.event_vans (
+  id bigint generated always as identity primary key,
+  event_id bigint not null references public.events(id) on delete cascade,
+  van_name text not null,
+  nickname text not null,
+  created_at timestamptz not null default now(),
+  unique (event_id, van_name)
+);
+
+create table if not exists public.packup_items (
+  id bigint generated always as identity primary key,
+  event_van_id bigint not null references public.event_vans(id) on delete cascade,
+  item text not null,
+  planned_qty integer not null default 0 check (planned_qty >= 0),
+  checked_qty integer not null default 0 check (checked_qty >= 0),
+  checked_at timestamptz,
+  checked_by uuid references public.profiles(id),
+  created_at timestamptz not null default now(),
+  unique (event_van_id, item)
+);
+
+create table if not exists public.van_nickname_history (
+  id bigint generated always as identity primary key,
+  event_id bigint not null references public.events(id) on delete cascade,
+  van_name text not null,
+  nickname text not null,
+  assigned_at timestamptz not null default now(),
+  cleared_at timestamptz
+);
+
+create index if not exists idx_events_event_date on public.events(event_date);
+create index if not exists idx_event_vans_event_id on public.event_vans(event_id);
+create index if not exists idx_packup_items_event_van_id on public.packup_items(event_van_id);
+
 create or replace function public.handle_new_user()
 returns trigger
 language plpgsql
@@ -221,6 +266,10 @@ alter table public.profiles enable row level security;
 alter table public.inventory enable row level security;
 alter table public.movements enable row level security;
 alter table public.signup_allowed_emails enable row level security;
+alter table public.events enable row level security;
+alter table public.event_vans enable row level security;
+alter table public.packup_items enable row level security;
+alter table public.van_nickname_history enable row level security;
 
 drop policy if exists "profiles_select_own" on public.profiles;
 create policy "profiles_select_own"
@@ -249,6 +298,80 @@ on public.signup_allowed_emails
 for select
 to authenticated
 using (public.is_manager());
+
+drop policy if exists "events_read_authenticated" on public.events;
+create policy "events_read_authenticated"
+on public.events
+for select
+to authenticated
+using (true);
+
+drop policy if exists "events_manager_write" on public.events;
+create policy "events_manager_write"
+on public.events
+for all
+to authenticated
+using (public.is_manager())
+with check (public.is_manager());
+
+drop policy if exists "event_vans_read_authenticated" on public.event_vans;
+create policy "event_vans_read_authenticated"
+on public.event_vans
+for select
+to authenticated
+using (true);
+
+drop policy if exists "event_vans_manager_write" on public.event_vans;
+create policy "event_vans_manager_write"
+on public.event_vans
+for all
+to authenticated
+using (public.is_manager())
+with check (public.is_manager());
+
+drop policy if exists "packup_items_read_authenticated" on public.packup_items;
+create policy "packup_items_read_authenticated"
+on public.packup_items
+for select
+to authenticated
+using (true);
+
+drop policy if exists "packup_items_staff_update" on public.packup_items;
+create policy "packup_items_staff_update"
+on public.packup_items
+for update
+to authenticated
+using (true)
+with check (checked_qty >= 0 and checked_qty <= planned_qty);
+
+drop policy if exists "packup_items_manager_write" on public.packup_items;
+create policy "packup_items_manager_write"
+on public.packup_items
+for insert
+to authenticated
+with check (public.is_manager());
+
+drop policy if exists "packup_items_manager_delete" on public.packup_items;
+create policy "packup_items_manager_delete"
+on public.packup_items
+for delete
+to authenticated
+using (public.is_manager());
+
+drop policy if exists "nickname_history_read_authenticated" on public.van_nickname_history;
+create policy "nickname_history_read_authenticated"
+on public.van_nickname_history
+for select
+to authenticated
+using (true);
+
+drop policy if exists "nickname_history_manager_write" on public.van_nickname_history;
+create policy "nickname_history_manager_write"
+on public.van_nickname_history
+for all
+to authenticated
+using (public.is_manager())
+with check (public.is_manager());
 
 grant execute on function public.add_stock(text, text, integer) to authenticated;
 grant execute on function public.transfer_inventory(text, text, text, integer) to authenticated;
