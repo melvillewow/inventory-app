@@ -5,8 +5,8 @@ import streamlit as st
 from supabase import create_client
 
 WAREHOUSES = ["Club", "House"]
-VANS = [f"VAN{i}" for i in range(1, 11)]
-ALL_LOCATIONS = WAREHOUSES + VANS
+DEFAULT_VANS = [f"Van_{i}" for i in range(1, 11)]
+ALL_LOCATIONS = WAREHOUSES + DEFAULT_VANS
 
 st.set_page_config(page_title="Inventory Tracker", layout="wide")
 
@@ -36,6 +36,47 @@ def check_config():
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
+
+
+def initialize_van_state():
+    today = datetime.now().date().isoformat()
+    if "vans" not in st.session_state:
+        st.session_state.vans = DEFAULT_VANS.copy()
+    if "van_nicknames" not in st.session_state:
+        st.session_state.van_nicknames = {}
+    if st.session_state.get("van_nickname_date") != today:
+        st.session_state.van_nickname_date = today
+        st.session_state.van_nicknames = {}
+
+
+def get_vans():
+    initialize_van_state()
+    return st.session_state.vans
+
+
+def van_label(van_name):
+    nickname = st.session_state.van_nicknames.get(van_name, "").strip()
+    if nickname:
+        return f'{van_name} ("{nickname}")'
+    return van_name
+
+
+def add_van():
+    vans = get_vans()
+    numbers = [int(v.split("_")[1]) for v in vans if "_" in v and v.split("_")[1].isdigit()]
+    next_number = (max(numbers) + 1) if numbers else 1
+    new_van = f"Van_{next_number}"
+    vans.append(new_van)
+    return new_van
+
+
+def set_van_nickname(van_name, nickname):
+    initialize_van_state()
+    cleaned = nickname.strip()
+    if cleaned:
+        st.session_state.van_nicknames[van_name] = cleaned
+    else:
+        st.session_state.van_nicknames.pop(van_name, None)
 
 
 def normalize_email(email):
@@ -209,6 +250,8 @@ def remove_allowed_signup(sb, email):
 
 
 def main_app(sb):
+    initialize_van_state()
+    vans = get_vans()
     role = get_user_role(sb, st.session_state.user.id)
     st.title("Inventory Tracker")
     st.caption("Manage stock across warehouses and vans.")
@@ -229,11 +272,12 @@ def main_app(sb):
         "Add Stock",
         "Transfer / Return",
         "Movement History",
+        "Van Assignments",
     ]
     if role == "manager":
         tab_names.append("User Access")
     tabs = st.tabs(tab_names)
-    tab1, tab2, tab3, tab4 = tabs[0], tabs[1], tabs[2], tabs[3]
+    tab1, tab2, tab3, tab4, tab5 = tabs[0], tabs[1], tabs[2], tabs[3], tabs[4]
 
     with tab1:
         left, right = st.columns(2)
@@ -244,8 +288,12 @@ def main_app(sb):
                 show_table_for_location(inventory_rows, wh)
         with right:
             st.subheader("Vans")
-            selected_van = st.selectbox("Choose van", VANS)
-            st.markdown(f"**{selected_van}**")
+            selected_van = st.selectbox(
+                "Choose van",
+                vans,
+                format_func=van_label,
+            )
+            st.markdown(f"**{van_label(selected_van)}**")
             show_table_for_location(inventory_rows, selected_van)
 
     with tab2:
@@ -283,7 +331,7 @@ def main_app(sb):
             )
             t_qty = st.number_input("Quantity", min_value=1, step=1, key="t_qty")
         with c2:
-            to_van = st.selectbox("To van", VANS, key="t_to_van")
+            to_van = st.selectbox("To van", vans, key="t_to_van", format_func=van_label)
             st.write("")
             st.write("")
             if st.button("Transfer to Van", key="transfer_btn"):
@@ -303,7 +351,12 @@ def main_app(sb):
         st.subheader("Return Van -> Warehouse")
         r1, r2 = st.columns(2)
         with r1:
-            from_van = st.selectbox("From van", VANS, key="r_from_van")
+            from_van = st.selectbox(
+                "From van",
+                vans,
+                key="r_from_van",
+                format_func=van_label,
+            )
             van_items = sorted(
                 {r["item"] for r in inventory_rows if r["location"] == from_van}
             )
@@ -355,8 +408,50 @@ def main_app(sb):
                 hide_index=True,
             )
 
+    with tab5:
+        st.subheader("Van Naming and Daily Events")
+        st.caption("Event nicknames reset automatically each new day.")
+
+        if st.button("Add New Van", key="add_new_van_btn"):
+            new_van = add_van()
+            st.success(f"Added new van: {new_van}")
+            st.rerun()
+
+        st.write("")
+        selected_nickname_van = st.selectbox(
+            "Van to assign event nickname",
+            vans,
+            key="nickname_van",
+            format_func=van_label,
+        )
+        nickname_value = st.text_input(
+            "Nickname/event for today",
+            key="nickname_value",
+            placeholder='Example: loggerhead marine (leave blank to clear)',
+        )
+        if st.button("Save Nickname", key="save_nickname_btn"):
+            set_van_nickname(selected_nickname_van, nickname_value)
+            if nickname_value.strip():
+                st.success(
+                    f'Updated {selected_nickname_van} nickname to "{nickname_value.strip()}".'
+                )
+            else:
+                st.success(f"Cleared nickname for {selected_nickname_van}.")
+            st.rerun()
+
+        st.write("")
+        st.markdown("**Current van assignments for today**")
+        assignments = [
+            {
+                "Van": van,
+                "Event Nickname": st.session_state.van_nicknames.get(van, ""),
+            }
+            for van in vans
+        ]
+        st.dataframe(pd.DataFrame(assignments), use_container_width=True, hide_index=True)
+
     if role == "manager":
-        with tabs[4]:
+        with tabs[5]:
             st.subheader("Signup Allowlist")
             st.caption("Only emails in this list can create new accounts.")
 

@@ -1,14 +1,17 @@
 from collections import defaultdict
+from datetime import date
 
 
 WAREHOUSES = ["Club", "House"]
-VANS = [f"VAN{i}" for i in range(1, 11)]
 
 
 class InventorySystem:
     def __init__(self):
         # location -> item -> quantity
         self.stock = defaultdict(lambda: defaultdict(int))
+        self.vans = [f"Van_{i}" for i in range(1, 11)]
+        self.van_nicknames = {}
+        self.nickname_date = date.today()
         self._seed_data()
 
     def _seed_data(self):
@@ -17,8 +20,47 @@ class InventorySystem:
         self.stock["House"]["White Risers"] = 4
         self.stock["House"]["Orchids"] = 13
 
+    def _reset_nicknames_if_new_day(self):
+        today = date.today()
+        if today != self.nickname_date:
+            self.van_nicknames.clear()
+            self.nickname_date = today
+
     def _valid_location(self, location):
-        return location in WAREHOUSES or location in VANS
+        self._reset_nicknames_if_new_day()
+        return location in WAREHOUSES or location in self.vans
+
+    def list_vans(self):
+        self._reset_nicknames_if_new_day()
+        return self.vans[:]
+
+    def van_label(self, van_name):
+        nickname = self.van_nicknames.get(van_name)
+        return f'{van_name} ("{nickname}")' if nickname else van_name
+
+    def add_van(self):
+        if not self.vans:
+            next_number = 1
+        else:
+            numbers = [int(v.split("_")[1]) for v in self.vans if "_" in v and v.split("_")[1].isdigit()]
+            next_number = (max(numbers) + 1) if numbers else (len(self.vans) + 1)
+
+        new_van = f"Van_{next_number}"
+        self.vans.append(new_van)
+        return f"Added new van: {new_van}"
+
+    def assign_van_nickname(self, van_name, nickname):
+        self._reset_nicknames_if_new_day()
+        if van_name not in self.vans:
+            return f"Invalid van: {van_name}"
+
+        cleaned = nickname.strip()
+        if not cleaned:
+            self.van_nicknames.pop(van_name, None)
+            return f"Cleared nickname for {van_name}."
+
+        self.van_nicknames[van_name] = cleaned
+        return f'Assigned nickname "{cleaned}" to {van_name}.'
 
     def add_item(self, warehouse, item, qty):
         if warehouse not in WAREHOUSES:
@@ -58,7 +100,8 @@ class InventorySystem:
         for wh in WAREHOUSES:
             self.print_location_stock(wh)
         print("\n=== Vans ===")
-        for van in VANS:
+        for van in self.vans:
+            print(f"\n{self.van_label(van)}")
             self.print_location_stock(van)
 
 
@@ -69,6 +112,17 @@ def choose_location(prompt, allowed):
 
     # Match user input without case sensitivity (e.g., club, CLUB, Club).
     allowed_map = {name.lower(): name for name in allowed}
+    return allowed_map.get(choice.lower(), choice)
+
+
+def choose_van(inv, prompt):
+    vans = inv.list_vans()
+    print(prompt)
+    options_line = ", ".join(inv.van_label(van) for van in vans)
+    print("Options:", options_line)
+    choice = input("Enter van (e.g., Van_2): ").strip()
+
+    allowed_map = {van.lower(): van for van in vans}
     return allowed_map.get(choice.lower(), choice)
 
 
@@ -83,7 +137,9 @@ def main():
         print("4) Transfer warehouse -> van")
         print("5) Return van -> warehouse")
         print("6) View all stock")
-        print("7) Exit")
+        print("7) Add a new van")
+        print("8) Assign/clear van nickname for today")
+        print("9) Exit")
 
         choice = input("Choose an option: ").strip()
 
@@ -92,7 +148,8 @@ def main():
             inv.print_location_stock(wh)
 
         elif choice == "2":
-            van = choose_location("Select van", VANS)
+            van = choose_van(inv, "Select van")
+            print(f"Selected: {inv.van_label(van)}")
             inv.print_location_stock(van)
 
         elif choice == "3":
@@ -103,13 +160,13 @@ def main():
 
         elif choice == "4":
             wh = choose_location("From warehouse", WAREHOUSES)
-            van = choose_location("To van", VANS)
+            van = choose_van(inv, "To van")
             item = input("Item name: ").strip().title()
             qty = int(input("Quantity to transfer: ").strip())
             print(inv.transfer(wh, van, item, qty))
 
         elif choice == "5":
-            van = choose_location("From van", VANS)
+            van = choose_van(inv, "From van")
             wh = choose_location("To warehouse", WAREHOUSES)
             item = input("Item name: ").strip().title()
             qty = int(input("Quantity to return: ").strip())
@@ -119,11 +176,19 @@ def main():
             inv.print_all_stock()
 
         elif choice == "7":
+            print(inv.add_van())
+
+        elif choice == "8":
+            van = choose_van(inv, "Select van to nickname")
+            nickname = input('Nickname/event for today (blank to clear): ').strip()
+            print(inv.assign_van_nickname(van, nickname))
+
+        elif choice == "9":
             print("Goodbye.")
             break
 
         else:
-            print("Invalid choice. Enter 1-7.")
+            print("Invalid choice. Enter 1-9.")
 
 
 if __name__ == "__main__":
